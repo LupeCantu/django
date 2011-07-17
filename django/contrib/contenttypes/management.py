@@ -9,7 +9,7 @@ def update_contenttypes(app, created_models, verbosity=2, **kwargs):
     """
     ContentType.objects.clear_cache()
     content_types = list(ContentType.objects.filter(app_label=app.__name__.split('.')[-2]))
-    app_models = get_models(app)
+    app_models = get_models(app, include_auto_created=True)
     if not app_models:
         return
     for klass in app_models:
