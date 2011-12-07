@@ -1,3 +1,5 @@
+from __future__ import absolute_import
+
 import datetime
 import pickle
 from decimal import Decimal
@@ -7,10 +9,12 @@ from django.core.exceptions import FieldError
 from django.db.models import Count, Max, Avg, Sum, StdDev, Variance, F, Q
 from django.test import TestCase, Approximate, skipUnlessDBFeature
 
-from models import Author, Book, Publisher, Clues, Entries, HardbackBook
+from .models import Author, Book, Publisher, Clues, Entries, HardbackBook
 
 
 class AggregationTests(TestCase):
+    fixtures = ["aggregation_regress.json"]
+
     def assertObjectAttrs(self, obj, **kwargs):
         for attr, value in kwargs.iteritems():
             self.assertEqual(getattr(obj, attr), value)
@@ -644,7 +648,7 @@ class AggregationTests(TestCase):
         )
 
         # Regression for #10766 - Shouldn't be able to reference an aggregate
-        # fields in an an aggregate() call.
+        # fields in an aggregate() call.
         self.assertRaises(
             FieldError,
             lambda: Book.objects.annotate(mean_age=Avg('authors__age')).annotate(Avg('mean_age'))

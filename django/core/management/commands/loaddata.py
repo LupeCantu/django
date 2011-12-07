@@ -1,3 +1,7 @@
+# This is necessary in Python 2.5 to enable the with statement, in 2.6
+# and up it is no longer necessary.
+from __future__ import with_statement
+
 import sys
 import os
 import gzip
@@ -8,7 +12,8 @@ from django.conf import settings
 from django.core import serializers
 from django.core.management.base import BaseCommand
 from django.core.management.color import no_style
-from django.db import connections, router, transaction, DEFAULT_DB_ALIAS
+from django.db import (connections, router, transaction, DEFAULT_DB_ALIAS,
+      IntegrityError, DatabaseError)
 from django.db.models import get_apps
 from django.utils.itercompat import product
 
@@ -29,13 +34,19 @@ class Command(BaseCommand):
     )
 
     def handle(self, *fixture_labels, **options):
-        using = options.get('database', DEFAULT_DB_ALIAS)
+        using = options.get('database')
 
         connection = connections[using]
         self.style = no_style()
 
-        verbosity = int(options.get('verbosity', 1))
-        show_traceback = options.get('traceback', False)
+        if not len(fixture_labels):
+            self.stderr.write(
+                self.style.ERROR("No database fixture specified. Please provide the path of at least one fixture in the command line.\n")
+            )
+            return
+
+        verbosity = int(options.get('verbosity'))
+        show_traceback = options.get('traceback')
 
         # commit is a stealth option - it isn't really useful as
         # a command line option, but it can be useful when invoking
@@ -51,7 +62,7 @@ class Command(BaseCommand):
         fixture_object_count = 0
         models = set()
 
-        humanize = lambda dirname: dirname and "'%s'" % dirname or 'absolute path'
+        humanize = lambda dirname: "'%s'" % dirname if dirname else 'absolute path'
 
         # Get a cursor (even though we don't need one yet). This has
         # the side effect of initializing the test database (if
@@ -74,7 +85,7 @@ class Command(BaseCommand):
                 return zipfile.ZipFile.read(self, self.namelist()[0])
 
         compression_types = {
-            None:   file,
+            None:   open,
             'gz':   gzip.GzipFile,
             'zip':  SingleZipReader
         }
@@ -149,6 +160,11 @@ class Command(BaseCommand):
                     open_method = compression_types[compression_format]
                     try:
                         fixture = open_method(full_path, 'r')
+                    except IOError:
+                        if verbosity >= 2:
+                            self.stdout.write("No %s fixture '%s' in %s.\n" % \
+                                (format, fixture_name, humanize(fixture_dir)))
+                    else:
                         if label_found:
                             fixture.close()
                             self.stderr.write(self.style.ERROR("Multiple fixtures named '%s' in %s. Aborting.\n" %
@@ -166,12 +182,29 @@ class Command(BaseCommand):
                                     (format, fixture_name, humanize(fixture_dir)))
                             try:
                                 objects = serializers.deserialize(format, fixture, using=using)
-                                for obj in objects:
-                                    objects_in_fixture += 1
-                                    if router.allow_syncdb(using, obj.object.__class__):
-                                        loaded_objects_in_fixture += 1
-                                        models.add(obj.object.__class__)
-                                        obj.save(using=using)
+
+                                with connection.constraint_checks_disabled():
+                                    for obj in objects:
+                                        objects_in_fixture += 1
+                                        if router.allow_syncdb(using, obj.object.__class__):
+                                            loaded_objects_in_fixture += 1
+                                            models.add(obj.object.__class__)
+                                            try:
+                                                obj.save(using=using)
+                                            except (DatabaseError, IntegrityError), e:
+                                                msg = "Could not load %(app_label)s.%(object_name)s(pk=%(pk)s): %(error_msg)s" % {
+                                                        'app_label': obj.object._meta.app_label,
+                                                        'object_name': obj.object._meta.object_name,
+                                                        'pk': obj.object.pk,
+                                                        'error_msg': e
+                                                    }
+                                                raise e.__class__, e.__class__(msg), sys.exc_info()[2]
+
+                                # Since we disabled constraint checks, we must manually check for
+                                # any invalid keys that might have been added
+                                table_names = [model._meta.db_table for model in models]
+                                connection.check_constraints(table_names=table_names)
+
                                 loaded_object_count += loaded_objects_in_fixture
                                 fixture_object_count += objects_in_fixture
                                 label_found = True
@@ -204,11 +237,6 @@ class Command(BaseCommand):
                                     transaction.leave_transaction_management(using=using)
                                 return
 
-                    except Exception, e:
-                        if verbosity >= 2:
-                            self.stdout.write("No %s fixture '%s' in %s.\n" % \
-                                (format, fixture_name, humanize(fixture_dir)))
-
         # If we found even one object in a fixture, we need to reset the
         # database sequences.
         if loaded_object_count > 0:
@@ -223,17 +251,13 @@ class Command(BaseCommand):
             transaction.commit(using=using)
             transaction.leave_transaction_management(using=using)
 
-        if fixture_object_count == 0:
-            if verbosity >= 1:
-                self.stdout.write("No fixtures found.\n")
-        else:
-            if verbosity >= 1:
-                if fixture_object_count == loaded_object_count:
-                    self.stdout.write("Installed %d object(s) from %d fixture(s)\n" % (
-                        loaded_object_count, fixture_count))
-                else:
-                    self.stdout.write("Installed %d object(s) (of %d) from %d fixture(s)\n" % (
-                        loaded_object_count, fixture_object_count, fixture_count))
+        if verbosity >= 1:
+            if fixture_object_count == loaded_object_count:
+                self.stdout.write("Installed %d object(s) from %d fixture(s)\n" % (
+                    loaded_object_count, fixture_count))
+            else:
+                self.stdout.write("Installed %d object(s) (of %d) from %d fixture(s)\n" % (
+                    loaded_object_count, fixture_object_count, fixture_count))
 
         # Close the DB connection. This is required as a workaround for an
         # edge case in MySQL: if the same connection is used to

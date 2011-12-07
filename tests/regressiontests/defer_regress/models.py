@@ -4,6 +4,7 @@ Regression tests for defer() / only() behavior.
 
 from django.db import models
 
+
 class Item(models.Model):
     name = models.CharField(max_length=15)
     text = models.TextField(default="xyzzy")
@@ -36,3 +37,13 @@ class ResolveThis(models.Model):
 class Proxy(Item):
     class Meta:
         proxy = True
+
+class SimpleItem(models.Model):
+    name = models.CharField(max_length=15)
+    value = models.IntegerField()
+
+    def __unicode__(self):
+        return self.name
+
+class Feature(models.Model):
+    item = models.ForeignKey(SimpleItem)

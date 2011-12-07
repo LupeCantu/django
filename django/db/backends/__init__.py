@@ -3,13 +3,14 @@ try:
 except ImportError:
     import dummy_thread as thread
 from threading import local
+from contextlib import contextmanager
 
 from django.conf import settings
 from django.db import DEFAULT_DB_ALIAS
 from django.db.backends import util
 from django.db.transaction import TransactionManagementError
-from django.utils import datetime_safe
 from django.utils.importlib import import_module
+from django.utils.timezone import is_aware
 
 
 class BaseDatabaseWrapper(local):
@@ -238,6 +239,35 @@ class BaseDatabaseWrapper(local):
         if self.savepoint_state:
             self._savepoint_commit(sid)
 
+    @contextmanager
+    def constraint_checks_disabled(self):
+        disabled = self.disable_constraint_checking()
+        try:
+            yield
+        finally:
+            if disabled:
+                self.enable_constraint_checking()
+
+    def disable_constraint_checking(self):
+        """
+        Backends can implement as needed to temporarily disable foreign key constraint
+        checking.
+        """
+        pass
+
+    def enable_constraint_checking(self):
+        """
+        Backends can implement as needed to re-enable foreign key constraint checking.
+        """
+        pass
+
+    def check_constraints(self, table_names=None):
+        """
+        Backends can override this method if they can apply constraint checking (e.g. via "SET CONSTRAINTS
+        ALL IMMEDIATE"). Should raise an IntegrityError if any invalid foreign key references are encountered.
+        """
+        pass
+
     def close(self):
         if self.connection is not None:
             self.connection.close()
@@ -271,8 +301,10 @@ class BaseDatabaseFeatures(object):
 
     can_use_chunked_reads = True
     can_return_id_from_insert = False
+    has_bulk_insert = False
     uses_autocommit = False
     uses_savepoints = False
+    can_combine_inserts_with_and_without_auto_increment_pk = False
 
     # If True, don't use integer foreign keys referring to, e.g., positive
     # integer primary keys.
@@ -280,6 +312,8 @@ class BaseDatabaseFeatures(object):
     allow_sliced_subqueries = True
     has_select_for_update = False
     has_select_for_update_nowait = False
+
+    supports_select_related = True
 
     # Does the default test database allow multiple connections?
     # Usually an indication that the test database is in-memory
@@ -333,6 +367,10 @@ class BaseDatabaseFeatures(object):
 
     # date_interval_sql can properly handle mixed Date/DateTime fields and timedeltas
     supports_mixed_date_datetime_comparisons = True
+
+    # Does the backend support tablespaces? Default to False because it isn't
+    # in the SQL standard.
+    supports_tablespaces = False
 
     # Features that need to be confirmed at runtime
     # Cache whether the confirmation has been performed.
@@ -665,8 +703,12 @@ class BaseDatabaseOperations(object):
 
     def tablespace_sql(self, tablespace, inline=False):
         """
-        Returns the SQL that will be appended to tables or rows to define
-        a tablespace. Returns '' if the backend doesn't use tablespaces.
+        Returns the SQL that will be used in a query to define the tablespace.
+
+        Returns '' if the backend doesn't support tablespaces.
+
+        If inline is True, the SQL is appended to a row; otherwise it's appended
+        to the entire CREATE TABLE or CREATE INDEX statement.
         """
         return ''
 
@@ -686,7 +728,7 @@ class BaseDatabaseOperations(object):
         """
         if value is None:
             return None
-        return datetime_safe.new_date(value).strftime('%Y-%m-%d')
+        return unicode(value)
 
     def value_to_db_datetime(self, value):
         """
@@ -699,11 +741,13 @@ class BaseDatabaseOperations(object):
 
     def value_to_db_time(self, value):
         """
-        Transform a datetime value to an object compatible with what is expected
+        Transform a time value to an object compatible with what is expected
         by the backend driver for time columns.
         """
         if value is None:
             return None
+        if is_aware(value):
+            raise ValueError("Django does not support timezone-aware times.")
         return unicode(value)
 
     def value_to_db_decimal(self, value, max_digits, decimal_places):
@@ -760,7 +804,7 @@ class BaseDatabaseOperations(object):
         This is used on specific backends to rule out known aggregates
         that are known to have faulty implementations. If the named
         aggregate function has a known problem, the backend should
-        raise NotImplemented.
+        raise NotImplementedError.
         """
         pass
 
@@ -868,6 +912,19 @@ class BaseDatabaseIntrospection(object):
                         sequence_list.append({'table': f.m2m_db_table(), 'column': None})
 
         return sequence_list
+
+    def get_key_columns(self, cursor, table_name):
+        """
+        Backends can override this to return a list of (column_name, referenced_table_name,
+        referenced_column_name) for all key columns in given table.
+        """
+        raise NotImplementedError
+
+    def get_primary_key_column(self, cursor, table_name):
+        """
+        Backends can override this to return the column name of the primary key for the given table.
+        """
+        raise NotImplementedError
 
 class BaseDatabaseClient(object):
     """

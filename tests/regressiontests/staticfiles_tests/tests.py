@@ -1,5 +1,6 @@
 # -*- encoding: utf-8 -*-
 from __future__ import with_statement
+
 import codecs
 import os
 import posixpath
@@ -8,6 +9,7 @@ import sys
 import tempfile
 from StringIO import StringIO
 
+from django.template import loader, Context
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.core.files.storage import default_storage
@@ -21,9 +23,25 @@ from django.utils._os import rmtree_errorhandler
 from django.contrib.staticfiles import finders, storage
 
 TEST_ROOT = os.path.dirname(__file__)
+TEST_SETTINGS = {
+    'DEBUG': True,
+    'MEDIA_URL': '/media/',
+    'STATIC_URL': '/static/',
+    'MEDIA_ROOT': os.path.join(TEST_ROOT, 'project', 'site_media', 'media'),
+    'STATIC_ROOT': os.path.join(TEST_ROOT, 'project', 'site_media', 'static'),
+    'STATICFILES_DIRS': (
+        os.path.join(TEST_ROOT, 'project', 'documents'),
+        ('prefix', os.path.join(TEST_ROOT, 'project', 'prefixed')),
+    ),
+    'STATICFILES_FINDERS': (
+        'django.contrib.staticfiles.finders.FileSystemFinder',
+        'django.contrib.staticfiles.finders.AppDirectoriesFinder',
+        'django.contrib.staticfiles.finders.DefaultStorageFinder',
+    ),
+}
 
 
-class StaticFilesTestCase(TestCase):
+class BaseStaticFilesTestCase(object):
     """
     Test case with a couple utility assertions.
     """
@@ -32,6 +50,7 @@ class StaticFilesTestCase(TestCase):
         # gets accessed (by some other test), it evaluates settings.MEDIA_ROOT,
         # since we're planning on changing that we need to clear out the cache.
         default_storage._wrapped = empty
+        storage.staticfiles_storage._wrapped = empty
 
         # To make sure SVN doesn't hangs itself with the non-ASCII characters
         # during checkout, we actually create one file dynamically.
@@ -42,33 +61,36 @@ class StaticFilesTestCase(TestCase):
         self.addCleanup(os.unlink, _nonascii_filepath)
 
     def assertFileContains(self, filepath, text):
-        self.assertTrue(text in self._get_file(smart_unicode(filepath)),
+        self.assertIn(text, self._get_file(smart_unicode(filepath)),
                         u"'%s' not in '%s'" % (text, filepath))
 
     def assertFileNotFound(self, filepath):
         self.assertRaises(IOError, self._get_file, filepath)
 
-StaticFilesTestCase = override_settings(
-    DEBUG = True,
-    MEDIA_URL = '/media/',
-    STATIC_URL = '/static/',
-    MEDIA_ROOT =  os.path.join(TEST_ROOT, 'project', 'site_media', 'media'),
-    STATIC_ROOT = os.path.join(TEST_ROOT, 'project', 'site_media', 'static'),
-    STATICFILES_DIRS = (
-        os.path.join(TEST_ROOT, 'project', 'documents'),
-        ('prefix', os.path.join(TEST_ROOT, 'project', 'prefixed')),
-    ),
-    STATICFILES_FINDERS = (
-        'django.contrib.staticfiles.finders.FileSystemFinder',
-        'django.contrib.staticfiles.finders.AppDirectoriesFinder',
-        'django.contrib.staticfiles.finders.DefaultStorageFinder',
-    ),
-)(StaticFilesTestCase)
+    def render_template(self, template, **kwargs):
+        if isinstance(template, basestring):
+            template = loader.get_template_from_string(template)
+        return template.render(Context(kwargs)).strip()
+
+    def static_template_snippet(self, path):
+        return "{%% load static from staticfiles %%}{%% static '%s' %%}" % path
+
+    def assertStaticRenders(self, path, result, **kwargs):
+        template = self.static_template_snippet(path)
+        self.assertEqual(self.render_template(template, **kwargs), result)
+
+    def assertStaticRaises(self, exc, path, result, **kwargs):
+        self.assertRaises(exc, self.assertStaticRenders, path, result, **kwargs)
 
 
-class BuildStaticTestCase(StaticFilesTestCase):
+class StaticFilesTestCase(BaseStaticFilesTestCase, TestCase):
+    pass
+StaticFilesTestCase = override_settings(**TEST_SETTINGS)(StaticFilesTestCase)
+
+
+class BaseCollectionTestCase(BaseStaticFilesTestCase):
     """
-    Tests shared by all file-resolving features (collectstatic,
+    Tests shared by all file finding features (collectstatic,
     findstatic, and static serve view).
 
     This relies on the asserts defined in UtilityAssertsTestCase, but
@@ -76,17 +98,17 @@ class BuildStaticTestCase(StaticFilesTestCase):
     all these tests.
     """
     def setUp(self):
-        super(BuildStaticTestCase, self).setUp()
+        super(BaseCollectionTestCase, self).setUp()
         self.old_root = settings.STATIC_ROOT
-        settings.STATIC_ROOT = tempfile.mkdtemp()
+        settings.STATIC_ROOT = tempfile.mkdtemp(dir=os.environ['DJANGO_TEST_TEMP_DIR'])
         self.run_collectstatic()
         # Use our own error handler that can handle .svn dirs on Windows
-        self.addCleanup(shutil.rmtree, settings.STATIC_ROOT,
-                        ignore_errors=True, onerror=rmtree_errorhandler)
+        #self.addCleanup(shutil.rmtree, settings.STATIC_ROOT,
+        #                ignore_errors=True, onerror=rmtree_errorhandler)
 
     def tearDown(self):
         settings.STATIC_ROOT = self.old_root
-        super(BuildStaticTestCase, self).tearDown()
+        super(BaseCollectionTestCase, self).tearDown()
 
     def run_collectstatic(self, **kwargs):
         call_command('collectstatic', interactive=False, verbosity='0',
@@ -97,6 +119,10 @@ class BuildStaticTestCase(StaticFilesTestCase):
         filepath = os.path.join(settings.STATIC_ROOT, filepath)
         with codecs.open(filepath, "r", "utf-8") as f:
             return f.read()
+
+
+class CollectionTestCase(BaseCollectionTestCase, StaticFilesTestCase):
+    pass
 
 
 class TestDefaults(object):
@@ -142,7 +168,7 @@ class TestDefaults(object):
         self.assertFileContains(u'test/camelCase.txt', u'camelCase')
 
 
-class TestFindStatic(BuildStaticTestCase, TestDefaults):
+class TestFindStatic(CollectionTestCase, TestDefaults):
     """
     Test ``findstatic`` management command.
     """
@@ -171,12 +197,12 @@ class TestFindStatic(BuildStaticTestCase, TestDefaults):
             lines = [l.strip() for l in sys.stdout.readlines()]
         finally:
             sys.stdout = _stdout
-        self.assertEqual(len(lines), 3) # three because there is also the "Found <file> here" line
-        self.assertTrue('project' in lines[1])
-        self.assertTrue('apps' in lines[2])
+        self.assertEqual(len(lines), 3)  # three because there is also the "Found <file> here" line
+        self.assertIn('project', lines[1])
+        self.assertIn('apps', lines[2])
 
 
-class TestBuildStatic(BuildStaticTestCase, TestDefaults):
+class TestCollection(CollectionTestCase, TestDefaults):
     """
     Test ``collectstatic`` management command.
     """
@@ -195,7 +221,7 @@ class TestBuildStatic(BuildStaticTestCase, TestDefaults):
         self.assertFileNotFound('test/CVS')
 
 
-class TestBuildStaticClear(BuildStaticTestCase):
+class TestCollectionClear(CollectionTestCase):
     """
     Test the ``--clear`` option of the ``collectstatic`` managemenet command.
     """
@@ -203,19 +229,19 @@ class TestBuildStaticClear(BuildStaticTestCase):
         clear_filepath = os.path.join(settings.STATIC_ROOT, 'cleared.txt')
         with open(clear_filepath, 'w') as f:
             f.write('should be cleared')
-        super(TestBuildStaticClear, self).run_collectstatic(clear=True)
+        super(TestCollectionClear, self).run_collectstatic(clear=True)
 
     def test_cleared_not_found(self):
         self.assertFileNotFound('cleared.txt')
 
 
-class TestBuildStaticExcludeNoDefaultIgnore(BuildStaticTestCase, TestDefaults):
+class TestCollectionExcludeNoDefaultIgnore(CollectionTestCase, TestDefaults):
     """
     Test ``--exclude-dirs`` and ``--no-default-ignore`` options of the
     ``collectstatic`` management command.
     """
     def run_collectstatic(self):
-        super(TestBuildStaticExcludeNoDefaultIgnore, self).run_collectstatic(
+        super(TestCollectionExcludeNoDefaultIgnore, self).run_collectstatic(
             use_default_ignore_patterns=False)
 
     def test_no_common_ignore_patterns(self):
@@ -238,27 +264,140 @@ class TestNoFilesCreated(object):
         self.assertEqual(os.listdir(settings.STATIC_ROOT), [])
 
 
-class TestBuildStaticDryRun(BuildStaticTestCase, TestNoFilesCreated):
+class TestCollectionDryRun(CollectionTestCase, TestNoFilesCreated):
     """
     Test ``--dry-run`` option for ``collectstatic`` management command.
     """
     def run_collectstatic(self):
-        super(TestBuildStaticDryRun, self).run_collectstatic(dry_run=True)
+        super(TestCollectionDryRun, self).run_collectstatic(dry_run=True)
 
 
-class TestBuildStaticNonLocalStorage(BuildStaticTestCase, TestNoFilesCreated):
+class TestCollectionNonLocalStorage(CollectionTestCase, TestNoFilesCreated):
     """
     Tests for #15035
     """
     pass
 
-TestBuildStaticNonLocalStorage = override_settings(
+TestCollectionNonLocalStorage = override_settings(
     STATICFILES_STORAGE='regressiontests.staticfiles_tests.storage.DummyStorage',
-)(TestBuildStaticNonLocalStorage)
+)(TestCollectionNonLocalStorage)
+
+
+class TestCollectionCachedStorage(BaseCollectionTestCase,
+        BaseStaticFilesTestCase, TestCase):
+    """
+    Tests for the Cache busting storage
+    """
+    def cached_file_path(self, path):
+        fullpath = self.render_template(self.static_template_snippet(path))
+        return fullpath.replace(settings.STATIC_URL, '')
+
+    def test_template_tag_return(self):
+        """
+        Test the CachedStaticFilesStorage backend.
+        """
+        self.assertStaticRaises(ValueError,
+                                "does/not/exist.png",
+                                "/static/does/not/exist.png")
+        self.assertStaticRenders("test/file.txt",
+                                 "/static/test/file.dad0999e4f8f.txt")
+        self.assertStaticRenders("cached/styles.css",
+                                 "/static/cached/styles.93b1147e8552.css")
+
+    def test_template_tag_simple_content(self):
+        relpath = self.cached_file_path("cached/styles.css")
+        self.assertEqual(relpath, "cached/styles.93b1147e8552.css")
+        with storage.staticfiles_storage.open(relpath) as relfile:
+            content = relfile.read()
+            self.assertNotIn("cached/other.css", content)
+            self.assertIn("/static/cached/other.d41d8cd98f00.css", content)
+
+    def test_path_with_querystring(self):
+        relpath = self.cached_file_path("cached/styles.css?spam=eggs")
+        self.assertEqual(relpath,
+                         "cached/styles.93b1147e8552.css?spam=eggs")
+        with storage.staticfiles_storage.open(
+                "cached/styles.93b1147e8552.css") as relfile:
+            content = relfile.read()
+            self.assertNotIn("cached/other.css", content)
+            self.assertIn("/static/cached/other.d41d8cd98f00.css", content)
+
+    def test_path_with_fragment(self):
+        relpath = self.cached_file_path("cached/styles.css#eggs")
+        self.assertEqual(relpath, "cached/styles.93b1147e8552.css#eggs")
+        with storage.staticfiles_storage.open(
+                "cached/styles.93b1147e8552.css") as relfile:
+            content = relfile.read()
+            self.assertNotIn("cached/other.css", content)
+            self.assertIn("/static/cached/other.d41d8cd98f00.css", content)
+
+    def test_template_tag_absolute(self):
+        relpath = self.cached_file_path("cached/absolute.css")
+        self.assertEqual(relpath, "cached/absolute.cc80cb5e2eb1.css")
+        with storage.staticfiles_storage.open(relpath) as relfile:
+            content = relfile.read()
+            self.assertNotIn("/static/cached/styles.css", content)
+            self.assertIn("/static/cached/styles.93b1147e8552.css", content)
+
+    def test_template_tag_denorm(self):
+        relpath = self.cached_file_path("cached/denorm.css")
+        self.assertEqual(relpath, "cached/denorm.363de96e9b4b.css")
+        with storage.staticfiles_storage.open(relpath) as relfile:
+            content = relfile.read()
+            self.assertNotIn("..//cached///styles.css", content)
+            self.assertIn("/static/cached/styles.93b1147e8552.css", content)
+
+    def test_template_tag_relative(self):
+        relpath = self.cached_file_path("cached/relative.css")
+        self.assertEqual(relpath, "cached/relative.2217ea7273c2.css")
+        with storage.staticfiles_storage.open(relpath) as relfile:
+            content = relfile.read()
+            self.assertNotIn("../cached/styles.css", content)
+            self.assertNotIn('@import "styles.css"', content)
+            self.assertIn("/static/cached/styles.93b1147e8552.css", content)
+            self.assertNotIn("url(img/relative.png)", content)
+            self.assertIn("/static/cached/img/relative.acae32e4532b.png", content)
+            self.assertIn("/static/cached/absolute.cc80cb5e2eb1.css#eggs", content)
+
+    def test_template_tag_deep_relative(self):
+        relpath = self.cached_file_path("cached/css/window.css")
+        self.assertEqual(relpath, "cached/css/window.9db38d5169f3.css")
+        with storage.staticfiles_storage.open(relpath) as relfile:
+            content = relfile.read()
+            self.assertNotIn('url(img/window.png)', content)
+            self.assertIn('url("/static/cached/css/img/window.acae32e4532b.png")', content)
+
+    def test_template_tag_url(self):
+        relpath = self.cached_file_path("cached/url.css")
+        self.assertEqual(relpath, "cached/url.615e21601e4b.css")
+        with storage.staticfiles_storage.open(relpath) as relfile:
+            self.assertIn("https://", relfile.read())
+
+    def test_cache_invalidation(self):
+        name = "cached/styles.css"
+        hashed_name = "cached/styles.93b1147e8552.css"
+        # check if the cache is filled correctly as expected
+        cache_key = storage.staticfiles_storage.cache_key(name)
+        cached_name = storage.staticfiles_storage.cache.get(cache_key)
+        self.assertEqual(self.cached_file_path(name), cached_name)
+        # clearing the cache to make sure we re-set it correctly in the url method
+        storage.staticfiles_storage.cache.clear()
+        cached_name = storage.staticfiles_storage.cache.get(cache_key)
+        self.assertEqual(cached_name, None)
+        self.assertEqual(self.cached_file_path(name), hashed_name)
+        cached_name = storage.staticfiles_storage.cache.get(cache_key)
+        self.assertEqual(cached_name, hashed_name)
+
+# we set DEBUG to False here since the template tag wouldn't work otherwise
+TestCollectionCachedStorage = override_settings(**dict(TEST_SETTINGS,
+    STATICFILES_STORAGE='django.contrib.staticfiles.storage.CachedStaticFilesStorage',
+    DEBUG=False,
+))(TestCollectionCachedStorage)
 
 
 if sys.platform != 'win32':
-    class TestBuildStaticLinks(BuildStaticTestCase, TestDefaults):
+
+    class TestCollectionLinks(CollectionTestCase, TestDefaults):
         """
         Test ``--link`` option for ``collectstatic`` management command.
 
@@ -267,7 +406,7 @@ if sys.platform != 'win32':
         ``--link`` does not change the file-selection semantics.
         """
         def run_collectstatic(self):
-            super(TestBuildStaticLinks, self).run_collectstatic(link=True)
+            super(TestCollectionLinks, self).run_collectstatic(link=True)
 
         def test_links_created(self):
             """
@@ -311,6 +450,7 @@ class TestServeStaticWithDefaultURL(TestServeStatic, TestDefaults):
     Test static asset serving view with manually configured URLconf.
     """
     pass
+
 
 class TestServeStaticWithURLHelper(TestServeStatic, TestDefaults):
     """
@@ -393,28 +533,38 @@ class TestMiscFinder(TestCase):
     """
     A few misc finder tests.
     """
+    def setUp(self):
+        default_storage._wrapped = empty
+
     def test_get_finder(self):
-        self.assertTrue(isinstance(finders.get_finder(
+        self.assertIsInstance(finders.get_finder(
             'django.contrib.staticfiles.finders.FileSystemFinder'),
-            finders.FileSystemFinder))
+            finders.FileSystemFinder)
 
     def test_get_finder_bad_classname(self):
-        self.assertRaises(ImproperlyConfigured,
-            finders.get_finder, 'django.contrib.staticfiles.finders.FooBarFinder')
+        self.assertRaises(ImproperlyConfigured, finders.get_finder,
+                          'django.contrib.staticfiles.finders.FooBarFinder')
 
     def test_get_finder_bad_module(self):
         self.assertRaises(ImproperlyConfigured,
             finders.get_finder, 'foo.bar.FooBarFinder')
 
-
-class TestStaticfilesDirsType(TestCase):
-    """
-    We can't determine if STATICFILES_DIRS is set correctly just by looking at
-    the type, but we can determine if it's definitely wrong.
-    """
+    @override_settings(STATICFILES_DIRS='a string')
     def test_non_tuple_raises_exception(self):
+        """
+        We can't determine if STATICFILES_DIRS is set correctly just by
+        looking at the type, but we can determine if it's definitely wrong.
+        """
         self.assertRaises(ImproperlyConfigured, finders.FileSystemFinder)
 
-TestStaticfilesDirsType = override_settings(
-    STATICFILES_DIRS = 'a string',
-)(TestStaticfilesDirsType)
+    @override_settings(MEDIA_ROOT='')
+    def test_location_empty(self):
+        self.assertRaises(ImproperlyConfigured, finders.DefaultStorageFinder)
+
+
+class TestTemplateTag(StaticFilesTestCase):
+
+    def test_template_tag(self):
+        self.assertStaticRenders("does/not/exist.png",
+                                   "/static/does/not/exist.png")
+        self.assertStaticRenders("testfile.txt", "/static/testfile.txt")

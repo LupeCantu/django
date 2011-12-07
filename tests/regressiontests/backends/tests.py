@@ -1,16 +1,21 @@
 # -*- coding: utf-8 -*-
 # Unit and doctests for specific database backends.
+from __future__ import with_statement, absolute_import
+
 import datetime
 
 from django.conf import settings
 from django.core.management.color import no_style
-from django.db import backend, connection, connections, DEFAULT_DB_ALIAS, IntegrityError
+from django.db import (backend, connection, connections, DEFAULT_DB_ALIAS,
+    IntegrityError, transaction)
 from django.db.backends.signals import connection_created
 from django.db.backends.postgresql_psycopg2 import version as pg_version
+from django.db.utils import ConnectionHandler, DatabaseError
 from django.test import TestCase, skipUnlessDBFeature, TransactionTestCase
 from django.utils import unittest
 
-from regressiontests.backends import models
+from . import models
+
 
 class OracleChecks(unittest.TestCase):
 
@@ -225,6 +230,46 @@ class PostgresVersionTest(TestCase):
         conn = OlderConnectionMock()
         self.assertEqual(pg_version.get_version(conn), 80300)
 
+class PostgresNewConnectionTest(TestCase):
+    """
+    #17062: PostgreSQL shouldn't roll back SET TIME ZONE, even if the first
+    transaction is rolled back.
+    """
+    @unittest.skipUnless(
+        connection.vendor == 'postgresql' and connection.isolation_level > 0,
+        "This test applies only to PostgreSQL without autocommit")
+    def test_connect_and_rollback(self):
+        new_connections = ConnectionHandler(settings.DATABASES)
+        new_connection = new_connections[DEFAULT_DB_ALIAS]
+        try:
+            # Ensure the database default time zone is different than
+            # the time zone in new_connection.settings_dict. We can
+            # get the default time zone by reset & show.
+            cursor = new_connection.cursor()
+            cursor.execute("RESET TIMEZONE")
+            cursor.execute("SHOW TIMEZONE")
+            db_default_tz = cursor.fetchone()[0]
+            new_tz = 'Europe/Paris' if db_default_tz == 'UTC' else 'UTC'
+            new_connection.close()
+
+            # Fetch a new connection with the new_tz as default
+            # time zone, run a query and rollback.
+            new_connection.settings_dict['TIME_ZONE'] = new_tz
+            new_connection.enter_transaction_management()
+            cursor = new_connection.cursor()
+            new_connection.rollback()
+
+            # Now let's see if the rollback rolled back the SET TIME ZONE.
+            cursor.execute("SHOW TIMEZONE")
+            tz = cursor.fetchone()[0]
+            self.assertEqual(new_tz, tz)
+        finally:
+            try:
+                new_connection.close()
+            except DatabaseError:
+                pass
+
+
 # Unfortunately with sqlite3 the in-memory test database cannot be
 # closed, and so it cannot be re-opened during testing, and so we
 # sadly disable this test for now.
@@ -328,7 +373,8 @@ class FkConstraintsTests(TransactionTestCase):
         try:
             a.save()
         except IntegrityError:
-            pass
+            return
+        self.skipTest("This backend does not support integrity checks.")
 
     def test_integrity_checks_on_update(self):
         """
@@ -343,4 +389,60 @@ class FkConstraintsTests(TransactionTestCase):
         try:
             a.save()
         except IntegrityError:
-            pass
+            return
+        self.skipTest("This backend does not support integrity checks.")
+
+    def test_disable_constraint_checks_manually(self):
+        """
+        When constraint checks are disabled, should be able to write bad data without IntegrityErrors.
+        """
+        with transaction.commit_manually():
+            # Create an Article.
+            models.Article.objects.create(headline="Test article", pub_date=datetime.datetime(2010, 9, 4), reporter=self.r)
+            # Retrive it from the DB
+            a = models.Article.objects.get(headline="Test article")
+            a.reporter_id = 30
+            try:
+                connection.disable_constraint_checking()
+                a.save()
+                connection.enable_constraint_checking()
+            except IntegrityError:
+                self.fail("IntegrityError should not have occurred.")
+            finally:
+                transaction.rollback()
+
+    def test_disable_constraint_checks_context_manager(self):
+        """
+        When constraint checks are disabled (using context manager), should be able to write bad data without IntegrityErrors.
+        """
+        with transaction.commit_manually():
+            # Create an Article.
+            models.Article.objects.create(headline="Test article", pub_date=datetime.datetime(2010, 9, 4), reporter=self.r)
+            # Retrive it from the DB
+            a = models.Article.objects.get(headline="Test article")
+            a.reporter_id = 30
+            try:
+                with connection.constraint_checks_disabled():
+                    a.save()
+            except IntegrityError:
+                self.fail("IntegrityError should not have occurred.")
+            finally:
+                transaction.rollback()
+
+    def test_check_constraints(self):
+        """
+        Constraint checks should raise an IntegrityError when bad data is in the DB.
+        """
+        with transaction.commit_manually():
+            # Create an Article.
+            models.Article.objects.create(headline="Test article", pub_date=datetime.datetime(2010, 9, 4), reporter=self.r)
+            # Retrive it from the DB
+            a = models.Article.objects.get(headline="Test article")
+            a.reporter_id = 30
+            try:
+                with connection.constraint_checks_disabled():
+                    a.save()
+                    with self.assertRaises(IntegrityError):
+                        connection.check_constraints()
+            finally:
+                transaction.rollback()

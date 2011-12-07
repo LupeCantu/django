@@ -1,9 +1,12 @@
 """
 
 """
+from __future__ import absolute_import
+
 from django.contrib import admin
 
-import models
+from . import models
+
 
 class WidgetAdmin(admin.AdminSite):
     pass
@@ -27,4 +30,14 @@ site = WidgetAdmin(name='widget-admin')
 site.register(models.User)
 site.register(models.Car, CarAdmin)
 site.register(models.CarTire, CarTireAdmin)
+
+site.register(models.Member)
+site.register(models.Band)
 site.register(models.Event, EventAdmin)
+site.register(models.Album)
+
+site.register(models.Inventory)
+
+site.register(models.Bee)
+
+site.register(models.Advisor)

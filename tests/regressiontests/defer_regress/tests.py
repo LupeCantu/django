@@ -1,3 +1,5 @@
+from __future__ import with_statement, absolute_import
+
 from operator import attrgetter
 
 from django.contrib.contenttypes.models import ContentType
@@ -6,7 +8,8 @@ from django.db.models import Count
 from django.db.models.loading import cache
 from django.test import TestCase
 
-from models import ResolveThis, Item, RelatedItem, Child, Leaf, Proxy
+from .models import (ResolveThis, Item, RelatedItem, Child, Leaf, Proxy,
+    SimpleItem, Feature)
 
 
 class DeferRegressionTest(TestCase):
@@ -18,22 +21,18 @@ class DeferRegressionTest(TestCase):
         obj = Item.objects.only("name", "other_value").get(name="first")
         # Accessing "name" doesn't trigger a new database query. Accessing
         # "value" or "text" should.
-        def test():
+        with self.assertNumQueries(0):
             self.assertEqual(obj.name, "first")
             self.assertEqual(obj.other_value, 0)
-        self.assertNumQueries(0, test)
 
-        def test():
+        with self.assertNumQueries(1):
             self.assertEqual(obj.value, 42)
-        self.assertNumQueries(1, test)
 
-        def test():
+        with self.assertNumQueries(1):
             self.assertEqual(obj.text, "xyzzy")
-        self.assertNumQueries(1, test)
 
-        def test():
+        with self.assertNumQueries(0):
             self.assertEqual(obj.text, "xyzzy")
-        self.assertNumQueries(0, test)
 
         # Regression test for #10695. Make sure different instances don't
         # inadvertently share data in the deferred descriptor objects.
@@ -108,11 +107,13 @@ class DeferRegressionTest(TestCase):
         self.assertEqual(
             klasses, [
                 Child,
+                Feature,
                 Item,
                 Leaf,
                 Proxy,
                 RelatedItem,
                 ResolveThis,
+                SimpleItem,
             ]
         )
 
@@ -128,6 +129,7 @@ class DeferRegressionTest(TestCase):
             klasses, [
                 "Child",
                 "Child_Deferred_value",
+                "Feature",
                 "Item",
                 "Item_Deferred_name",
                 "Item_Deferred_name_other_value_text",
@@ -144,12 +146,13 @@ class DeferRegressionTest(TestCase):
                 "RelatedItem_Deferred_",
                 "RelatedItem_Deferred_item_id",
                 "ResolveThis",
+                "SimpleItem",
             ]
         )
 
         # Regression for #16409 - make sure defer() and only() work with annotate()
-        self.assertIsInstance(list(Item.objects.annotate(Count('relateditem')).defer('name')), list)
-        self.assertIsInstance(list(Item.objects.annotate(Count('relateditem')).only('name')), list)
+        self.assertIsInstance(list(SimpleItem.objects.annotate(Count('feature')).defer('name')), list)
+        self.assertIsInstance(list(SimpleItem.objects.annotate(Count('feature')).only('name')), list)
 
     def test_only_and_defer_usage_on_proxy_models(self):
         # Regression for #15790 - only() broken for proxy models

@@ -6,7 +6,9 @@ test case that is capable of testing the capabilities of
 the serializers. This includes all valid data values, plus
 forward, backwards and self references.
 """
-from __future__ import with_statement
+# This is necessary in Python 2.5 to enable the with statement, in 2.6
+# and up it is no longer necessary.
+from __future__ import with_statement, absolute_import
 
 import datetime
 import decimal
@@ -17,11 +19,23 @@ except ImportError:
 
 from django.core import serializers
 from django.core.serializers import SerializerDoesNotExist
-from django.db import connection
+from django.db import connection, models
 from django.test import TestCase
 from django.utils.functional import curry
 
-from models import *
+from .models import (BooleanData, CharData, DateData, DateTimeData, EmailData,
+    FileData, FilePathData, DecimalData, FloatData, IntegerData, IPAddressData,
+    GenericIPAddressData, NullBooleanData, PhoneData, PositiveIntegerData,
+    PositiveSmallIntegerData, SlugData, SmallData, TextData, TimeData,
+    USStateData, GenericData, Anchor, UniqueAnchor, FKData, M2MData, O2OData,
+    FKSelfData, M2MSelfData, FKDataToField, FKDataToO2O, M2MIntermediateData,
+    Intermediate, BooleanPKData, CharPKData, EmailPKData, FilePathPKData,
+    DecimalPKData, FloatPKData, IntegerPKData, IPAddressPKData,
+    GenericIPAddressPKData, PhonePKData, PositiveIntegerPKData,
+    PositiveSmallIntegerPKData, SlugPKData, SmallPKData, USStatePKData,
+    AutoNowDateTimeData, ModifyingSaveData, InheritAbstractModel,
+    ExplicitInheritBaseModel, InheritBaseModel, BigIntegerData, LengthModel,
+    Tag, ComplexModel)
 
 # A set of functions that can be used to recreate
 # test data objects of various kinds.
@@ -382,7 +396,8 @@ def serializerTest(format, self):
     objects = []
     instance_count = {}
     for (func, pk, klass, datum) in test_data:
-        objects.extend(func[0](pk, klass, datum))
+        with connection.constraint_checks_disabled():
+            objects.extend(func[0](pk, klass, datum))
 
     # Get a count of the number of objects created for each class
     for klass in instance_count:
